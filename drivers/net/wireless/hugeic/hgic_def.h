@@ -32,7 +32,8 @@
 #define HGIC_TX_COOKIE_MASK 0x7FFF
 #define HGIC_BLOCK_ACK_CNT  256
 
-#define hgic_dbg(fmt, ...) printk("%s:%d::"fmt, __FUNCTION__, __LINE__, ##__VA_ARGS__)
+//#define hgic_dbg(fmt, ...) printk("%s:%d::"fmt, __FUNCTION__, __LINE__, ##__VA_ARGS__)
+#define hgic_dbg(fmt, ...) do {} while (0)
 #define hgic_err(fmt, ...) printk("%s:%d::"fmt, __FUNCTION__, __LINE__, ##__VA_ARGS__)
 
 #define hgic_enter()       printk("enter %s\r\n", __FUNCTION__)

@@ -67,7 +67,7 @@ void hgicf_rx_fw_event(struct hgic_fwctrl *ctrl, struct sk_buff *skb)
     if (!drop) {
         if (skb_queue_len(&hg->evt_list) > HGIC_EVENT_MAX) {
             kfree_skb(skb_dequeue(&hg->evt_list));
-            hgic_err("event list is full (max %d), drop old event\r\n", HGIC_EVENT_MAX);
+            //hgic_err("event list is full (max %d), drop old event\r\n", HGIC_EVENT_MAX);
         }
         skb_queue_tail(&hg->evt_list, skb);
         up(&hg->evt_sema);
