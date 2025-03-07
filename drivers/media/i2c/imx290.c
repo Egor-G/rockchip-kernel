@@ -36,7 +36,7 @@
 #define V4L2_CID_DIGITAL_GAIN		V4L2_CID_GAIN
 #endif
 
-#define IMX290_LINK_FREQ		445500000
+#define IMX290_LINK_FREQ		222750000
 
 /* pixel rate = link_freq * 2 * nr_of_lanes / bits_per_sample */
 #define IMX290_PIXEL_RATE 		(IMX290_LINK_FREQ * 2 * 2 / 12)
@@ -125,8 +125,6 @@ struct imx290_mode {
 	u32 vts_def;
 	u32 exp_def;
 	const struct regval *reg_list;
-	u32 hdr_mode;
-	struct rkmodule_lvds_cfg lvds_cfg;
 };
 
 struct imx290 {
@@ -167,7 +165,6 @@ struct imx290 {
 	const char		*len_name;
 	u32			cur_vts;
 	bool			has_init_exp;
-	struct preisp_hdrae_exp_s init_hdrae_exp;
 	struct v4l2_fwnode_endpoint bus_cfg;
 	u8			flip;
 };
@@ -299,13 +296,12 @@ static const struct imx290_mode mipi_supported_modes[] = {
 		.height = 1097,
 		.max_fps = {
 			.numerator = 10000,
-			.denominator = 250000,
+			.denominator = 300000,
 		},
 		.exp_def = 0x03fe,
 		.hts_def = 0x1130,
-		.vts_def = 0x0546,
+		.vts_def = 0x0465,
 		.reg_list = imx290_linear_1920x1080_mipi_regs,
-		.hdr_mode = NO_HDR,
 	}
 };
 
@@ -581,94 +577,6 @@ static int imx290_g_mbus_config(struct v4l2_subdev *sd, unsigned int pad_id,
 	return 0;
 }
 
-static int imx290_set_hdrae(struct imx290 *imx290,
-			    struct preisp_hdrae_exp_s *ae)
-{
-	u32 l_exp_time, m_exp_time, s_exp_time;
-	u32 l_gain, m_gain, s_gain;
-	u32 shs1, shs2, rhs1;
-	u32 gain_switch = 0;
-	int ret = 0;
-	u8 cg_mode = 0;
-	u32 fsc = imx290->cur_vts;//The HDR mode vts is double by default to workaround T-line
-
-	if (!imx290->has_init_exp && !imx290->streaming) {
-		imx290->init_hdrae_exp = *ae;
-		imx290->has_init_exp = true;
-		dev_dbg(&imx290->client->dev, "imx290 don't stream, record exp for hdr!\n");
-		return ret;
-	}
-
-	l_exp_time = ae->long_exp_reg;
-	m_exp_time = ae->middle_exp_reg;
-	s_exp_time = ae->short_exp_reg;
-	l_gain = ae->long_gain_reg;
-	m_gain = ae->middle_gain_reg;
-	s_gain = ae->short_gain_reg;
-
-	if (imx290->cur_mode->hdr_mode == HDR_X2) {
-		//2 stagger
-		l_gain = m_gain;
-		l_exp_time = m_exp_time;
-		cg_mode = ae->middle_cg_mode;
-	}
-	dev_dbg(&imx290->client->dev,
-		"rev exp req: L_time=%d, gain=%d, S_time=%d, gain=%d\n",
-		l_exp_time, l_gain,
-		s_exp_time, s_gain);
-	ret = imx290_read_reg(imx290->client, IMX290_GAIN_SWITCH_REG,
-				IMX290_REG_VALUE_08BIT, &gain_switch);
-	if (!g_isHCG && cg_mode == GAIN_MODE_HCG) {
-		gain_switch |= 0x0110;
-		g_isHCG = true;
-	} else if (g_isHCG && cg_mode == GAIN_MODE_LCG) {
-		gain_switch &= 0xef;
-		gain_switch |= 0x100;
-		g_isHCG = false;
-	}
-
-	//long exposure and short exposure
-	rhs1 = 0xe1;
-	shs1 = rhs1 - s_exp_time - 1;
-	shs2 = fsc - l_exp_time - 1;
-	if (shs1 < 2)
-		shs1 = 2;
-	if (shs2 < (rhs1 + 2))
-		shs2 = rhs1 + 2;
-	else if (shs2 > (fsc - 2))
-		shs2 = fsc - 2;
-
-	ret |= imx290_write_reg(imx290->client, IMX290_REG_SHS1_L,
-		IMX290_REG_VALUE_08BIT,
-		IMX290_FETCH_LOW_BYTE_EXP(shs1));
-	ret |= imx290_write_reg(imx290->client, IMX290_REG_SHS1_M,
-		IMX290_REG_VALUE_08BIT,
-		IMX290_FETCH_MID_BYTE_EXP(shs1));
-	ret |= imx290_write_reg(imx290->client, IMX290_REG_SHS1_H,
-		IMX290_REG_VALUE_08BIT,
-		IMX290_FETCH_HIGH_BYTE_EXP(shs1));
-
-	ret |= imx290_write_reg(imx290->client, IMX290_REG_LF_GAIN,
-		IMX290_REG_VALUE_08BIT,
-		l_gain);
-	if (gain_switch & 0x100) {
-		ret |= imx290_write_reg(imx290->client,
-				IMX290_GROUP_HOLD_REG,
-				IMX290_REG_VALUE_08BIT,
-				IMX290_GROUP_HOLD_START);
-		ret |= imx290_write_reg(imx290->client, IMX290_GAIN_SWITCH_REG,
-				IMX290_REG_VALUE_08BIT, gain_switch);
-		ret |= imx290_write_reg(imx290->client,
-				IMX290_GROUP_HOLD_REG,
-				IMX290_REG_VALUE_08BIT,
-				IMX290_GROUP_HOLD_END);
-	}
-	dev_dbg(&imx290->client->dev,
-		"set l_gain:0x%x s_gain:0x%x shs2:0x%x shs1:0x%x\n",
-		l_gain, s_gain, shs2, shs1);
-	return ret;
-}
-
 static void imx290_get_module_inf(struct imx290 *imx290,
 				  struct rkmodule_inf *inf)
 {
@@ -679,166 +587,14 @@ static void imx290_get_module_inf(struct imx290 *imx290,
 	strlcpy(inf->base.lens, imx290->len_name, sizeof(inf->base.lens));
 }
 
-static int imx290_set_conversion_gain(struct imx290 *imx290, u32 *cg)
-{
-	int ret = 0;
-	struct i2c_client *client = imx290->client;
-	int cur_cg = *cg;
-	u32 gain_switch = 0;
-
-	ret = imx290_read_reg(client,
-		IMX290_GAIN_SWITCH_REG,
-		IMX290_REG_VALUE_08BIT,
-		&gain_switch);
-	if (g_isHCG && cur_cg == GAIN_MODE_LCG) {
-		gain_switch &= 0xef;
-		gain_switch |= 0x0100;
-		g_isHCG = false;
-	} else if (!g_isHCG && cur_cg == GAIN_MODE_HCG) {
-		gain_switch |= 0x0110;
-		g_isHCG = true;
-	}
-
-	if (gain_switch & 0x100) {
-		ret |= imx290_write_reg(client,
-			IMX290_GROUP_HOLD_REG,
-			IMX290_REG_VALUE_08BIT,
-			IMX290_GROUP_HOLD_START);
-		ret |= imx290_write_reg(client,
-			IMX290_GAIN_SWITCH_REG,
-			IMX290_REG_VALUE_08BIT,
-			gain_switch & 0xff);
-		ret |= imx290_write_reg(client,
-			IMX290_GROUP_HOLD_REG,
-			IMX290_REG_VALUE_08BIT,
-			IMX290_GROUP_HOLD_END);
-	}
-
-	return ret;
-}
-
-#define USED_SYS_DEBUG
-#ifdef USED_SYS_DEBUG
-//ag: echo 0 >  /sys/devices/platform/ff510000.i2c/i2c-1/1-0037/cam_s_cg
-static ssize_t set_conversion_gain_status(struct device *dev,
-	struct device_attribute *attr,
-	const char *buf,
-	size_t count)
-{
-	struct i2c_client *client = to_i2c_client(dev);
-	struct v4l2_subdev *sd = i2c_get_clientdata(client);
-	struct imx290 *imx290 = to_imx290(sd);
-	int status = 0;
-	int ret = 0;
-
-	ret = kstrtoint(buf, 0, &status);
-	if (!ret && status >= 0 && status < 2)
-		imx290_set_conversion_gain(imx290, &status);
-	else
-		dev_err(dev, "input 0 for LCG, 1 for HCG, cur %d\n", status);
-	return count;
-}
-
-static struct device_attribute attributes[] = {
-	__ATTR(cam_s_cg, S_IWUSR, NULL, set_conversion_gain_status),
-};
-
-static int add_sysfs_interfaces(struct device *dev)
-{
-	int i;
-
-	for (i = 0; i < ARRAY_SIZE(attributes); i++)
-		if (device_create_file(dev, attributes + i))
-			goto undo;
-	return 0;
-undo:
-	for (i--; i >= 0 ; i--)
-		device_remove_file(dev, attributes + i);
-	dev_err(dev, "%s: failed to create sysfs interface\n", __func__);
-	return -ENODEV;
-}
-#endif
-
 static long imx290_ioctl(struct v4l2_subdev *sd, unsigned int cmd, void *arg)
 {
 	struct imx290 *imx290 = to_imx290(sd);
-	struct rkmodule_hdr_cfg *hdr;
-	struct rkmodule_lvds_cfg *lvds_cfg;
-	u32 i, h, w;
 	long ret = 0;
-	s64 dst_pixel_rate = 0;
-	s32 dst_link_freq = 0;
-	u32 stream = 0;
 
 	switch (cmd) {
 	case RKMODULE_GET_MODULE_INFO:
 		imx290_get_module_inf(imx290, (struct rkmodule_inf *)arg);
-		break;
-	case PREISP_CMD_SET_HDRAE_EXP:
-		ret = imx290_set_hdrae(imx290, arg);
-		break;
-	case RKMODULE_GET_HDR_CFG:
-		hdr = (struct rkmodule_hdr_cfg *)arg;
-		if (imx290->cur_mode->hdr_mode == NO_HDR)
-			hdr->esp.mode = HDR_NORMAL_VC;
-		else
-			hdr->esp.mode = HDR_ID_CODE;
-		hdr->hdr_mode = imx290->cur_mode->hdr_mode;
-		break;
-	case RKMODULE_SET_HDR_CFG:
-		hdr = (struct rkmodule_hdr_cfg *)arg;
-		for (i = 0; i < imx290->support_modes_num; i++) {
-			if (imx290->support_modes[i].hdr_mode == hdr->hdr_mode) {
-				imx290->cur_mode = &imx290->support_modes[i];
-				break;
-			}
-		}
-		if (i == imx290->support_modes_num) {
-			dev_err(&imx290->client->dev,
-				"not find hdr mode:%d config\n",
-				hdr->hdr_mode);
-			ret = -EINVAL;
-		} else {
-			w = imx290->cur_mode->hts_def - imx290->cur_mode->width;
-			h = imx290->cur_mode->vts_def - imx290->cur_mode->height;
-			__v4l2_ctrl_modify_range(imx290->hblank, w, w, 1, w);
-			__v4l2_ctrl_modify_range(imx290->vblank, h,
-				IMX290_VTS_MAX - imx290->cur_mode->height,
-				1, h);
-			dst_link_freq = 0;
-			dst_pixel_rate = IMX290_PIXEL_RATE;
-			__v4l2_ctrl_s_ctrl_int64(imx290->pixel_rate,
-						 dst_pixel_rate);
-			__v4l2_ctrl_s_ctrl(imx290->link_freq,
-					   dst_link_freq);
-			imx290->cur_vts = imx290->cur_mode->vts_def;
-		}
-		break;
-	case RKMODULE_SET_CONVERSION_GAIN:
-		ret = imx290_set_conversion_gain(imx290, (u32 *)arg);
-		break;
-	case RKMODULE_GET_LVDS_CFG:
-		lvds_cfg = (struct rkmodule_lvds_cfg *)arg;
-		if (imx290->bus_cfg.bus_type == V4L2_MBUS_CCP2)
-			memcpy(lvds_cfg, &imx290->cur_mode->lvds_cfg,
-				sizeof(struct rkmodule_lvds_cfg));
-		else
-			ret = -ENOIOCTLCMD;
-		break;
-	case RKMODULE_SET_QUICK_STREAM:
-
-		stream = *((u32 *)arg);
-
-		if (stream)
-			ret = imx290_write_reg(imx290->client,
-					       IMX290_REG_CTRL_MODE,
-					       IMX290_REG_VALUE_08BIT,
-					       0);
-		else
-			ret = imx290_write_reg(imx290->client,
-					       IMX290_REG_CTRL_MODE,
-					       IMX290_REG_VALUE_08BIT,
-					       1);
 		break;
 	default:
 		ret = -ENOIOCTLCMD;
@@ -854,11 +610,7 @@ static long imx290_compat_ioctl32(struct v4l2_subdev *sd,
 	void __user *up = compat_ptr(arg);
 	struct rkmodule_inf *inf;
 	struct rkmodule_awb_cfg *cfg;
-	struct rkmodule_hdr_cfg *hdr;
-	struct preisp_hdrae_exp_s *hdrae;
 	long ret;
-	u32 cg = 0;
-	u32 stream = 0;
 
 	switch (cmd) {
 	case RKMODULE_GET_MODULE_INFO:
@@ -884,52 +636,6 @@ static long imx290_compat_ioctl32(struct v4l2_subdev *sd,
 			ret = imx290_ioctl(sd, cmd, cfg);
 		kfree(cfg);
 		break;
-	case RKMODULE_GET_HDR_CFG:
-		hdr = kzalloc(sizeof(*hdr), GFP_KERNEL);
-		if (!hdr) {
-			ret = -ENOMEM;
-			return ret;
-		}
-
-		ret = imx290_ioctl(sd, cmd, hdr);
-		if (!ret)
-			ret = copy_to_user(up, hdr, sizeof(*hdr));
-		kfree(hdr);
-		break;
-	case RKMODULE_SET_HDR_CFG:
-		hdr = kzalloc(sizeof(*hdr), GFP_KERNEL);
-		if (!hdr) {
-			ret = -ENOMEM;
-			return ret;
-		}
-
-		ret = copy_from_user(hdr, up, sizeof(*hdr));
-		if (!ret)
-			ret = imx290_ioctl(sd, cmd, hdr);
-		kfree(hdr);
-		break;
-	case PREISP_CMD_SET_HDRAE_EXP:
-		hdrae = kzalloc(sizeof(*hdrae), GFP_KERNEL);
-		if (!hdrae) {
-			ret = -ENOMEM;
-			return ret;
-		}
-
-		ret = copy_from_user(hdrae, up, sizeof(*hdrae));
-		if (!ret)
-			ret = imx290_ioctl(sd, cmd, hdrae);
-		kfree(hdrae);
-		break;
-	case RKMODULE_SET_CONVERSION_GAIN:
-		ret = copy_from_user(&cg, up, sizeof(cg));
-		if (!ret)
-			ret = imx290_ioctl(sd, cmd, &cg);
-		break;
-	case RKMODULE_SET_QUICK_STREAM:
-		ret = copy_from_user(&stream, up, sizeof(u32));
-		if (!ret)
-			ret = imx290_ioctl(sd, cmd, &stream);
-		break;
 	default:
 		ret = -ENOIOCTLCMD;
 		break;
@@ -939,34 +645,11 @@ static long imx290_compat_ioctl32(struct v4l2_subdev *sd,
 }
 #endif
 
-static int imx290_init_conversion_gain(struct imx290 *imx290)
-{
-	int ret = 0;
-	struct i2c_client *client = imx290->client;
-	u32 val = 0;
-
-	ret = imx290_read_reg(client,
-		IMX290_GAIN_SWITCH_REG,
-		IMX290_REG_VALUE_08BIT,
-		&val);
-	val &= 0xef;
-	ret = imx290_write_reg(client,
-		IMX290_GAIN_SWITCH_REG,
-		IMX290_REG_VALUE_08BIT,
-		val);
-	if (!ret)
-		g_isHCG = false;
-	return ret;
-}
-
 static int __imx290_start_stream(struct imx290 *imx290)
 {
 	int ret;
 
 	ret = imx290_write_array(imx290->client, imx290->cur_mode->reg_list);
-	if (ret)
-		return ret;
-	ret = imx290_init_conversion_gain(imx290);
 	if (ret)
 		return ret;
 	/* In case these controls are set before streaming */
@@ -1198,7 +881,6 @@ static int imx290_enum_frame_interval(struct v4l2_subdev *sd,
 	fie->width = imx290->support_modes[fie->index].width;
 	fie->height = imx290->support_modes[fie->index].height;
 	fie->interval = imx290->support_modes[fie->index].max_fps;
-	fie->reserved[0] = imx290->support_modes[fie->index].hdr_mode;
 	return 0;
 }
 
@@ -1226,10 +908,7 @@ static int imx290_get_selection(struct v4l2_subdev *sd,
 		sel->r.left = CROP_START(imx290->cur_mode->width, DST_WIDTH);
 		sel->r.width = DST_WIDTH;
 		if (imx290->bus_cfg.bus_type == V4L2_MBUS_CCP2) {
-			if (imx290->cur_mode->hdr_mode == NO_HDR)
-				sel->r.top = 21;
-			else
-				sel->r.top = 13;
+			sel->r.top = 21;
 		} else {
 			sel->r.top = CROP_START(imx290->cur_mode->height, DST_HEIGHT);
 		}
@@ -1307,7 +986,6 @@ static int imx290_set_ctrl(struct v4l2_ctrl *ctrl)
 
 	switch (ctrl->id) {
 	case V4L2_CID_EXPOSURE:
-		if (imx290->cur_mode->hdr_mode == NO_HDR) {
 			shs1 = imx290->cur_vts - ctrl->val - 1;
 			ret = imx290_write_reg(imx290->client,
 				IMX290_REG_SHS1_H,
@@ -1323,23 +1001,18 @@ static int imx290_set_ctrl(struct v4l2_ctrl *ctrl)
 				IMX290_FETCH_LOW_BYTE_EXP(shs1));
 			dev_dbg(&client->dev, "set exposure 0x%x, cur_vts 0x%x,shs1 0x%x\n",
 				ctrl->val, imx290->cur_vts, shs1);
-		}
 		break;
 	case V4L2_CID_ANALOGUE_GAIN:
-		if (imx290->cur_mode->hdr_mode == NO_HDR) {
 			ret = imx290_write_reg(imx290->client,
 				IMX290_REG_LF_GAIN,
 				IMX290_REG_VALUE_08BIT,
 				ctrl->val);
 			dev_dbg(&client->dev, "set analog gain 0x%x\n",
 				ctrl->val);
-		}
 		break;
 	case V4L2_CID_VBLANK:
 		vts = ctrl->val + imx290->cur_mode->height;
 		imx290->cur_vts = vts;
-		if (imx290->cur_mode->hdr_mode == HDR_X2)
-			vts /= 2;
 		ret = imx290_write_reg(imx290->client,
 			IMX290_REG_VTS_H,
 			IMX290_REG_VALUE_08BIT,
@@ -1414,8 +1087,6 @@ static int imx290_initialize_controls(struct imx290 *imx290)
 	s64 exposure_max, vblank_def;
 	u32 h_blank;
 	int ret;
-	s32 dst_link_freq = 0;
-	s64 dst_pixel_rate = 0;
 
 	handler = &imx290->ctrl_handler;
 	mode = imx290->cur_mode;
@@ -1427,12 +1098,8 @@ static int imx290_initialize_controls(struct imx290 *imx290)
 	imx290->link_freq = v4l2_ctrl_new_int_menu(handler, NULL, V4L2_CID_LINK_FREQ,
 				      1, 0, link_freq_menu_items);
 
-	dst_link_freq = 0;
-	dst_pixel_rate = IMX290_PIXEL_RATE;
-	__v4l2_ctrl_s_ctrl(imx290->link_freq,
-			   dst_link_freq);
 	imx290->pixel_rate = v4l2_ctrl_new_std(handler, NULL, V4L2_CID_PIXEL_RATE,
-			  0, IMX290_PIXEL_RATE, 1, dst_pixel_rate);
+			  0, IMX290_PIXEL_RATE, 1, IMX290_PIXEL_RATE);
 
 	h_blank = mode->hts_def - mode->width;
 
